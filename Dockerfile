@@ -1,15 +1,17 @@
-FROM maven:3-eclipse-temurin-21-alpine AS mchain
-WORKDIR /tmp/
+# syntax=docker/dockerfile:1
+FROM eclipse-temurin:25-jdk-alpine AS build
+WORKDIR /workspace
+COPY .mvn/ .mvn/
+COPY --chmod=755 mvnw .
 COPY pom.xml .
 COPY src/ src/
-RUN mvn clean package
+RUN --mount=type=cache,target=/root/.m2 ./mvnw --batch-mode --no-transfer-progress verify
 
-FROM eclipse-temurin:21-alpine
+FROM eclipse-temurin:25-jre-alpine
 LABEL org.opencontainers.image.authors="m.buechner@dnb.de"
 ENV TZ=Europe/Berlin
-ENV IIIF.PORT=8080
-RUN mkdir /opt/iiif
 WORKDIR /opt/iiif
-COPY --from=mchain /tmp/target/iiif.jar iiif.jar
-CMD ["java", "-Xms4G", "-Xmx8G", "-jar", "iiif.jar"]
+COPY --from=build /workspace/target/iiif.jar iiif.jar
+USER 10001:10001
 EXPOSE 8080
+CMD ["java", "-jar", "iiif.jar"]
