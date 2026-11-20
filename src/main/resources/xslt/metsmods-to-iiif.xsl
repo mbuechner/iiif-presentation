@@ -48,12 +48,14 @@ limitations under the License.
     <!--
         Der Controller übergibt die DDB-Objekt-ID für die Links zum DDB-Objekt und
         die öffentliche Manifest-URL als Basis für Canvases, Annotationen und Ranges.
+        Die API-Basis bestimmt das DDB-System, auf das die Metadatenlinks verweisen.
         Die Beispielwerte ermöglichen einen eigenständigen Testlauf des Stylesheets.
         Angaben zur liefernden Einrichtung kommen optional aus dem Cortex-Datensatz.
     -->
     <xsl:param name="itemId" as="xs:string" select="'TTNVQWVXY3AKILUHHULXB5H2ZHZGEKOO'" />
     <xsl:param name="itemUrl" as="xs:string"
             select="'https://iiif.deutsche-digitale-bibliothek.de/presentation/3/TTNVQWVXY3AKILUHHULXB5H2ZHZGEKOO'" />
+    <xsl:param name="ddbApiBase" as="xs:string" select="'https://api.deutsche-digitale-bibliothek.de/2/'" />
     <xsl:param name="providerInfo" as="element(cortex:provider-info)?" select="()" />
 
     <!-- Die Indizes lösen Dateizeiger und Strukturverweise im gesamten METS-Dokument auf. -->
@@ -156,7 +158,7 @@ limitations under the License.
                 'format': 'text/html'
             }]" />
         <xsl:map-entry key="'seeAlso'" select="[map {
-                'id': 'https://api.deutsche-digitale-bibliothek.de/2/items/' || $itemId,
+                'id': $ddbApiBase || 'items/' || $itemId,
                 'type': 'Dataset',
                 'format': 'application/xml',
                 'profile': 'https://www.deutsche-digitale-bibliothek.de/ns/cortex'

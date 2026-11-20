@@ -23,8 +23,15 @@ limitations under the License.
     -->
     <xsl:output encoding="UTF-8" method="xml" />
 
-    <!-- Der Controller übergibt die öffentliche Manifest-URL. Der Standardwert dient eigenständigen Testläufen. -->
+    <!--
+        Der Controller übergibt die öffentliche Manifest-URL und die API-Basis des gewählten DDB-Systems.
+        Die Standardwerte dienen eigenständigen Testläufen.
+    -->
     <xsl:param name="uri">https://labs.deutsche-digitale-bibliothek.de/iiif/presentation/3/ABCDEFGHIJKLMNOPQRSTUVWXYZ012345</xsl:param>
+    <xsl:param name="ddbApiBase" as="xs:string" select="'https://api.deutsche-digitale-bibliothek.de/2/'" />
+
+    <!-- Der öffentliche DDB-Binärdienst liefert Medien unabhängig von der Metadaten-API. -->
+    <xsl:variable name="ddbBinaryBase" as="xs:string" select="'https://iiif.deutsche-digitale-bibliothek.de/binary/'" />
 
     <!--
         Canvases, Annotationen und Ranges übernehmen die Umgebung des Manifests.
@@ -75,7 +82,7 @@ limitations under the License.
         <xsl:variable name="providerLogo" as="xs:string?">
             <xsl:if test="$providerId and $providerName">
                 <xsl:try>
-                    <xsl:variable name="providerUrl" select="'https://api.deutsche-digitale-bibliothek.de/2/items/' || encode-for-uri($providerId)" />
+                    <xsl:variable name="providerUrl" select="$ddbApiBase || 'items/' || encode-for-uri($providerId)" />
                     <xsl:sequence select="(doc($providerUrl)/cortex:cortex/cortex:binaries/cortex:binary[@primary = 'true']/@ref)[1] ! string(.)" />
                     <xsl:catch />
                 </xsl:try>
@@ -324,8 +331,7 @@ limitations under the License.
             <array key="seeAlso">
                 <map>
                     <string key="id">
-                        <xsl:text>https://api.deutsche-digitale-bibliothek.de/items/</xsl:text>
-                        <xsl:value-of select="$id" />
+                        <xsl:value-of select="$ddbApiBase || 'items/' || $id" />
                     </string>
                     <string key="type">Dataset</string>
                     <string key="format">application/xml</string>
@@ -337,15 +343,16 @@ limitations under the License.
                 Vimeo-Videos kommen aus den Binärreferenzen. Liegt die Seiten-ID einer
                 METS-Struktureinheit vor, führt sie im DFG-Viewer zur bezeichneten Seite.
             -->
-            <xsl:if test="/cortex:cortex/cortex:binaries/cortex:binary[@mimetype = 'application/pdf'] or /cortex:cortex/cortex:binaries/cortex:binary[@mimetype = 'video/vnd.ddbkultur.vimeo'] or /cortex:cortex/source:source/source:description/ns5:record/ns5:id[@type = 'mets:div/@ID']/@value">
+            <xsl:variable name="metsSourceRecord" select="(
+                    /cortex:cortex/source:source/source:description/ns5:record[ns5:id[@type = 'mets:div/@ID']/@value]
+                )[1]" />
+            <xsl:if test="/cortex:cortex/cortex:binaries/cortex:binary[@mimetype = 'application/pdf'] or /cortex:cortex/cortex:binaries/cortex:binary[@mimetype = 'video/vnd.ddbkultur.vimeo'] or $metsSourceRecord">
                 <array key="rendering">
                     <xsl:if test="/cortex:cortex/cortex:binaries/cortex:binary[@mimetype = 'application/pdf']">
                         <xsl:for-each select="/cortex:cortex/cortex:binaries/cortex:binary[@mimetype = 'application/pdf']">
                             <map>
                                 <string key="id">
-                                    <xsl:text>https://api.deutsche-digitale-bibliothek.de/binary/</xsl:text>
-                                    <xsl:value-of select="@ref" />
-                                    <xsl:text>.pdf</xsl:text>
+                                    <xsl:value-of select="$ddbBinaryBase || @ref || '.pdf'" />
                                 </string>
                                 <string key="type">Text</string>
                                 <map key="label">
@@ -374,13 +381,17 @@ limitations under the License.
                             </map>
                         </xsl:for-each>
                     </xsl:if>
-                    <xsl:if test="/cortex:cortex/source:source/source:description/ns5:record/ns5:id[@type = 'mets:div/@ID']/@value">
+                    <xsl:if test="$metsSourceRecord">
+                        <xsl:variable name="metsSourceUrl" select="
+                                $ddbApiBase || 'items/' || encode-for-uri(string($metsSourceRecord/@ref)) || '/source/record'
+                            " />
+                        <xsl:variable name="metsPage" select="string(($metsSourceRecord/ns5:id[@type = 'mets:div/@ID']/@value)[1])" />
                         <map>
                             <string key="id">
-                                <xsl:text>https://viewer.deutsche-digitale-bibliothek.de/index.php?id=1&amp;tx_dlf[id]=https%3A%2F%2Fapi.deutsche-digitale-bibliothek.de%2Fitems%2F</xsl:text>
-                                <xsl:value-of select="/cortex:cortex/source:source/source:description/ns5:record/@ref" />
-                                <xsl:text>%2Fsource%2Frecord&amp;tx_dlf[page]=</xsl:text>
-                                <xsl:value-of select="/cortex:cortex/source:source/source:description/ns5:record/ns5:id[@type = 'mets:div/@ID']/@value" />
+                                <xsl:text>https://viewer.deutsche-digitale-bibliothek.de/index.php?id=1&amp;tx_dlf[id]=</xsl:text>
+                                <xsl:value-of select="encode-for-uri($metsSourceUrl)" />
+                                <xsl:text>&amp;tx_dlf[page]=</xsl:text>
+                                <xsl:value-of select="encode-for-uri($metsPage)" />
                             </string>
                             <string key="type">Text</string>
                             <map key="label">
@@ -619,7 +630,7 @@ limitations under the License.
         </xsl:try>
     </xsl:template>
 
-    <!-- PDF-Canvases verlinken das Originaldokument über die Binary-API. -->
+    <!-- PDF-Canvases verlinken das Originaldokument über den DDB-Binärdienst. -->
     <xsl:template match="/cortex:cortex/cortex:binaries/cortex:binary[@mimetype = 'application/pdf']">
         <map>
             <string key="id">
@@ -662,9 +673,7 @@ limitations under the License.
                             <string key="motivation">painting</string>
                             <map key="body">
                                 <string key="id">
-                                    <xsl:text>https://api.deutsche-digitale-bibliothek.de/binary/</xsl:text>
-                                    <xsl:value-of select="@ref" />
-                                    <xsl:text>.pdf</xsl:text>
+                                    <xsl:value-of select="$ddbBinaryBase || @ref || '.pdf'" />
                                 </string>
                                 <string key="type">Document</string>
                                 <string key="format">application/pdf</string>
@@ -731,7 +740,7 @@ limitations under the License.
         </map>
     </xsl:template>
 
-    <!-- Video-Canvases binden die MP4-Datei aus der Binary-API als Painting-Annotation ein. -->
+    <!-- Video-Canvases binden die MP4-Datei aus dem DDB-Binärdienst als Painting-Annotation ein. -->
     <xsl:template match="/cortex:cortex/cortex:binaries/cortex:binary[@mimetype = 'video/mp4']">
         <map>
             <string key="id">
@@ -774,9 +783,7 @@ limitations under the License.
                             <string key="motivation">painting</string>
                             <map key="body">
                                 <string key="id">
-                                    <xsl:text>https://api.deutsche-digitale-bibliothek.de/binary/</xsl:text>
-                                    <xsl:value-of select="@ref" />
-                                    <xsl:text>.mp4</xsl:text>
+                                    <xsl:value-of select="$ddbBinaryBase || @ref || '.mp4'" />
                                 </string>
                                 <string key="type">Video</string>
                                 <string key="format">video/mp4</string>
@@ -815,7 +822,7 @@ limitations under the License.
         </map>
     </xsl:template>
 
-    <!-- Audiodateien des Typs audio/mpeg werden als MP3 über die Binary-API verlinkt. -->
+    <!-- Audiodateien des Typs audio/mpeg werden als MP3 über den DDB-Binärdienst verlinkt. -->
     <xsl:template match="/cortex:cortex/cortex:binaries/cortex:binary[@mimetype = 'audio/mpeg']">
         <map>
             <string key="id">
@@ -858,9 +865,7 @@ limitations under the License.
                             <string key="motivation">painting</string>
                             <map key="body">
                                 <string key="id">
-                                    <xsl:text>https://api.deutsche-digitale-bibliothek.de/binary/</xsl:text>
-                                    <xsl:value-of select="@ref" />
-                                    <xsl:text>.mp3</xsl:text>
+                                    <xsl:value-of select="$ddbBinaryBase || @ref || '.mp3'" />
                                 </string>
                                 <string key="type">Sound</string>
                                 <string key="format">audio/mpeg</string>

@@ -96,6 +96,9 @@ class MetadataTransformationTest {
         assertEquals("Bibliothek", result.at("/provider/0/label/none/0").asString());
         assertFalse(result.at("/provider/0").has("logo"));
         assertTrue(result.at("/metadata/0/value/none/0").asString().contains("a=1&amp;b=2"));
+        final String pdfUrl = "https://iiif.deutsche-digitale-bibliothek.de/binary/document.pdf";
+        assertEquals(pdfUrl, result.at("/rendering/0/id").asString());
+        assertEquals(pdfUrl, result.at("/items/0/items/0/items/0/body/id").asString());
     }
 
     @Test
@@ -116,7 +119,7 @@ class MetadataTransformationTest {
         assertEquals("https://iiif.deutsche-digitale-bibliothek.de/image/2/preview/full/200,/0/default.jpg",
                 result.at("/thumbnail/0/id").asString());
         final JsonNode audio = result.at("/items/2/items/0/items/0/body");
-        assertEquals("https://api.deutsche-digitale-bibliothek.de/binary/sound.mp3", audio.path("id").asString());
+        assertEquals("https://iiif.deutsche-digitale-bibliothek.de/binary/sound.mp3", audio.path("id").asString());
         assertEquals("audio/mpeg", audio.path("format").asString());
     }
 

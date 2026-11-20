@@ -78,9 +78,6 @@ class IiifRestController {
     private final OkHttpClient httpClient;
     private final CustomResolver resolver;
     private final String baseUrl;
-    private final String ddbApiKeyProd;
-    private final String ddbApiKeyQ1;
-    private final String ddbApiKeyQ2;
     private final int maxMetadataBytes;
     private final int maxManifestBytes;
     private final Processor processor;
@@ -97,29 +94,23 @@ class IiifRestController {
     @Autowired
     IiifRestController(
             @Value("${iiif.baseurl}") String baseUrl,
-            @Value("${iiif.ddb_api_key_prod}") String ddbApiKeyProd,
-            @Value("${iiif.ddb_api_key_q1}") String ddbApiKeyQ1,
-            @Value("${iiif.ddb_api_key_q2}") String ddbApiKeyQ2,
             @Value("${iiif.max-metadata-bytes:67108864}") int maxMetadataBytes,
             @Value("${iiif.max-manifest-bytes:67108864}") int maxManifestBytes) throws IOException, SaxonApiException {
-        this(baseUrl, ddbApiKeyProd, ddbApiKeyQ1, ddbApiKeyQ2, maxMetadataBytes, maxManifestBytes, new OkHttpClient.Builder()
+        this(baseUrl, maxMetadataBytes, maxManifestBytes, new OkHttpClient.Builder()
                 .connectTimeout(Duration.ofSeconds(5))
                 .readTimeout(Duration.ofSeconds(10))
                 .callTimeout(Duration.ofSeconds(30))
-                // Verhindert, dass eine Weiterleitung die authentifizierte Anfrage an ein anderes Ziel lenkt.
+                // Bindet den Metadatenabruf an den Host der gewählten DDB-Umgebung.
                 .followRedirects(false)
                 .build());
     }
 
-    IiifRestController(String baseUrl, String ddbApiKeyProd, String ddbApiKeyQ1, String ddbApiKeyQ2,
-                       int maxMetadataBytes, int maxManifestBytes, OkHttpClient httpClient) throws IOException, SaxonApiException {
+    IiifRestController(String baseUrl, int maxMetadataBytes, int maxManifestBytes, OkHttpClient httpClient)
+            throws IOException, SaxonApiException {
         if (maxMetadataBytes <= 0 || maxManifestBytes <= 0) {
             throw new IllegalArgumentException("Metadata and manifest size limits must be positive");
         }
         this.baseUrl = baseUrl.replaceFirst("/+$", "");
-        this.ddbApiKeyProd = ddbApiKeyProd;
-        this.ddbApiKeyQ1 = ddbApiKeyQ1;
-        this.ddbApiKeyQ2 = ddbApiKeyQ2;
         this.maxMetadataBytes = maxMetadataBytes;
         this.maxManifestBytes = maxManifestBytes;
         this.httpClient = httpClient;
@@ -152,8 +143,8 @@ class IiifRestController {
     }
 
     /**
-     * Liefert das Manifest für ein DDB-Objekt. Bei Anfragen an Q1 oder Q2 trägt die
-     * Manifest-ID die gewählte Testumgebung im Parameter {@code system}.
+     * Liefert das Manifest für ein DDB-Objekt aus den öffentlichen XML-Metadaten der DDB-API v2.
+     * Bei Anfragen an Q1 oder Q2 trägt die Manifest-ID die gewählte Testumgebung im Parameter {@code system}.
      *
      * @param request HTTP-Anfrage zur Ermittlung des Kontextpfads
      * @param id Base32-kodierte DDB-Objekt-ID
@@ -169,33 +160,32 @@ class IiifRestController {
 
         final String itemId = id.toUpperCase(Locale.ROOT);
         final String host;
-        final String key;
         final String query;
         switch (system == null ? "" : system.toUpperCase(Locale.ROOT)) {
             case "Q1" -> {
                 host = "api-q1.deutsche-digitale-bibliothek.de";
-                key = ddbApiKeyQ1;
                 query = "?system=Q1";
             }
             case "Q2" -> {
                 host = "api-q2.deutsche-digitale-bibliothek.de";
-                key = ddbApiKeyQ2;
                 query = "?system=Q2";
             }
             default -> {
                 host = "api.deutsche-digitale-bibliothek.de";
-                key = ddbApiKeyProd;
                 query = "";
             }
         }
-        final HttpUrl apiUrl = new HttpUrl.Builder()
+        final HttpUrl apiBase = new HttpUrl.Builder()
                 .scheme("https")
                 .host(host)
+                .addPathSegments("2/")
+                .build();
+        final HttpUrl apiUrl = apiBase.newBuilder()
                 .addPathSegment("items")
                 .addPathSegment(itemId)
                 .build();
         final Request upstreamRequest = new Request.Builder()
-                .url(apiUrl.newBuilder().addQueryParameter("oauth_consumer_key", key).build())
+                .url(apiUrl)
                 .header("Accept", MediaType.APPLICATION_XML_VALUE)
                 .build();
         final String manifestUrl = baseUrl + request.getContextPath() + "/" + itemId + query;
@@ -213,12 +203,11 @@ class IiifRestController {
                     return error(HttpStatus.BAD_GATEWAY, "DDB API request failed");
                 }
                 final InputSource input = new InputSource(new MetadataInput(response.body().byteStream(), maxMetadataBytes));
-                // Saxon erhält die Endpunkt-URL als Auflösungsbasis. Der API-Schlüssel verbleibt in der HTTP-Anfrage.
                 input.setSystemId(apiUrl.toString());
                 document = builder.build(CustomResolver.secureXmlSource(input));
             }
             final ManifestOutput manifest = new ManifestOutput(maxManifestBytes);
-            transform(builder, document, itemId, manifestUrl, manifest);
+            transform(builder, document, itemId, manifestUrl, apiBase, manifest);
             LOG.debug("{}: Manifest generated in {} ms", itemId, Duration.ofNanos(System.nanoTime() - start).toMillis());
             return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).contentLength(manifest.size())
                     .body(new InputStreamResource(manifest.getInputStream()));
@@ -236,12 +225,13 @@ class IiifRestController {
         }
     }
 
-    private void transform(DocumentBuilder builder, XdmNode document, String itemId, String manifestUrl, ManifestOutput output)
-            throws SaxonApiException, XPathException {
+    private void transform(DocumentBuilder builder, XdmNode document, String itemId, String manifestUrl, HttpUrl apiBase,
+                           ManifestOutput output) throws SaxonApiException, XPathException {
         final XdmItem cortex = select(cortexRecord, document);
         if (cortex == null) {
             throw new SaxonApiException("DDB API did not return Cortex XML");
         }
+        final XdmAtomicValue ddbApiBase = new XdmAtomicValue(apiBase.toString());
         final XdmNode record = (XdmNode) select(sourceRecord, cortex);
         if (record != null && METS_NAMESPACE.equalsIgnoreCase(record.attribute("type"))) {
             // DDB liefert METS als eingebettetes XML oder als Text, optional innerhalb eines OAI-PMH-Datensatzes.
@@ -262,6 +252,7 @@ class IiifRestController {
             final XsltTransformer transformer = transformer(metsmodsToIiif);
             transformer.setParameter(new QName("itemId"), new XdmAtomicValue(itemId));
             transformer.setParameter(new QName("itemUrl"), new XdmAtomicValue(manifestUrl));
+            transformer.setParameter(new QName("ddbApiBase"), ddbApiBase);
             final XdmItem provider = select(providerInfo, cortex);
             if (provider != null) {
                 transformer.setParameter(new QName("providerInfo"), provider);
@@ -274,6 +265,7 @@ class IiifRestController {
             final XdmDestination intermediate = new XdmDestination();
             final XsltTransformer transformer = transformer(cortexToIiif);
             transformer.setParameter(new QName("uri"), new XdmAtomicValue(manifestUrl));
+            transformer.setParameter(new QName("ddbApiBase"), ddbApiBase);
             transformer.setInitialContextNode(document);
             transformer.setDestination(intermediate);
             transformer.transform();

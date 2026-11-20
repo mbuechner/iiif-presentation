@@ -16,6 +16,7 @@
 package de.ddb.labs.iiif;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
@@ -23,6 +24,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 import okhttp3.Protocol;
 import okhttp3.Request;
@@ -49,7 +51,6 @@ class IiifRestControllerTest {
     private static final String BAD_METS_ID = "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG";
     private static final String LARGE_METADATA_ID = "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH";
     private static final String LARGE_MANIFEST_ID = "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII";
-    private static final String Q1_KEY = "test key & with=delimiters";
     private static final int MAX_METADATA_BYTES = 8192;
     private static final int MAX_MANIFEST_BYTES = 4096;
     private static final JsonMapper JSON = JsonMapper.builder()
@@ -58,11 +59,18 @@ class IiifRestControllerTest {
 
     private static final String CORTEX_XML = """
             <cortex xmlns="http://www.deutsche-digitale-bibliothek.de/cortex"
-                    xmlns:item="http://www.deutsche-digitale-bibliothek.de/item">
+                    xmlns:item="http://www.deutsche-digitale-bibliothek.de/item"
+                    xmlns:source="http://www.deutsche-digitale-bibliothek.de/ns/cortex-item-source"
+                    xmlns:description="http://www.deutsche-digitale-bibliothek.de/ns/cortex-item-source-description">
                 <properties><item-id>%s</item-id></properties>
                 <view><item:item><item:title>Bibliothek Köln</item:title></item:item></view>
+                <source:source><source:description>
+                    <description:record ref="%s">
+                        <description:id type="mets:div/@ID" value="page 2&amp;3"/>
+                    </description:record>
+                </source:description></source:source>
             </cortex>
-            """.formatted(CORTEX_ID);
+            """.formatted(CORTEX_ID, METS_ID);
 
     private static final String METS_XML = """
             <mets:mets xmlns:mets="http://www.loc.gov/METS/" xmlns:xlink="http://www.w3.org/1999/xlink"
@@ -90,8 +98,7 @@ class IiifRestControllerTest {
                 .addInterceptor(chain -> upstreamResponse(chain.request()))
                 .build();
         mvc = MockMvcBuilders.standaloneSetup(
-                new IiifRestController("https://iiif.example.org/", "test-prod-key", Q1_KEY, "test-q2-key",
-                        MAX_METADATA_BYTES, MAX_MANIFEST_BYTES, httpClient))
+                new IiifRestController("https://iiif.example.org/", MAX_METADATA_BYTES, MAX_MANIFEST_BYTES, httpClient))
                 .defaultResponseCharacterEncoding(StandardCharsets.UTF_8)
                 .build();
     }
@@ -112,6 +119,12 @@ class IiifRestControllerTest {
         assertEquals("Manifest", manifest.path("type").stringValue());
         assertEquals("https://iiif.example.org/presentation/" + CORTEX_ID + "?system=Q1", manifest.path("id").stringValue());
         assertEquals("Bibliothek Köln", manifest.at("/label/de/0").stringValue());
+        assertEquals("https://api-q1.deutsche-digitale-bibliothek.de/2/items/" + CORTEX_ID,
+                manifest.at("/seeAlso/0/id").stringValue());
+        final HttpUrl viewer = HttpUrl.get(manifest.at("/rendering/0/id").stringValue());
+        assertEquals("https://api-q1.deutsche-digitale-bibliothek.de/2/items/" + METS_ID + "/source/record",
+                viewer.queryParameter("tx_dlf[id]"));
+        assertEquals("page 2&3", viewer.queryParameter("tx_dlf[page]"));
     }
 
     @Test
@@ -123,6 +136,8 @@ class IiifRestControllerTest {
         assertTrue(manifest.path("provider").isMissingNode());
         assertEquals("https://iiif.example.org/" + METS_ID + "/canvas/P1?system=Q2", manifest.at("/items/0/id").stringValue());
         assertEquals("https://images.example.org/page.jpg", manifest.at("/items/0/items/0/items/0/body/id").stringValue());
+        assertEquals("https://api-q2.deutsche-digitale-bibliothek.de/2/items/" + METS_ID,
+                manifest.at("/seeAlso/0/id").stringValue());
     }
 
     @Test
@@ -170,33 +185,35 @@ class IiifRestControllerTest {
     }
 
     private static Response upstreamResponse(Request request) throws SocketTimeoutException {
+        assertNull(request.url().query());
+        assertNull(request.header("Authorization"));
+        assertEquals(MediaType.APPLICATION_XML_VALUE, request.header("Accept"));
         final Response.Builder response = new Response.Builder()
                 .request(request).protocol(Protocol.HTTP_1_1).code(200).message("test response");
         final String body;
         switch (request.url().encodedPath()) {
-            case "/items/" + CORTEX_ID -> {
+            case "/2/items/" + CORTEX_ID -> {
                 assertEquals("api-q1.deutsche-digitale-bibliothek.de", request.url().host());
-                assertEquals(Q1_KEY, request.url().queryParameter("oauth_consumer_key"));
                 body = CORTEX_XML;
             }
-            case "/items/" + METS_ID -> {
+            case "/2/items/" + METS_ID -> {
                 assertEquals("api-q2.deutsche-digitale-bibliothek.de", request.url().host());
-                assertEquals("test-q2-key", request.url().queryParameter("oauth_consumer_key"));
                 body = wrapMets(METS_XML);
             }
-            case "/items/" + MISSING_ID -> {
+            case "/2/items/" + MISSING_ID -> {
+                assertEquals("api.deutsche-digitale-bibliothek.de", request.url().host());
                 response.code(404);
                 body = "missing";
             }
-            case "/items/" + UPSTREAM_FAILURE_ID -> {
+            case "/2/items/" + UPSTREAM_FAILURE_ID -> {
                 response.code(403);
                 body = "upstream sensitive detail";
             }
-            case "/items/" + MALFORMED_XML_ID -> body = "<invalid>";
-            case "/items/" + TIMEOUT_ID -> throw new SocketTimeoutException("test timeout");
-            case "/items/" + BAD_METS_ID -> body = wrapMets("<not-mets/>");
-            case "/items/" + LARGE_METADATA_ID -> body = CORTEX_XML + " ".repeat(MAX_METADATA_BYTES);
-            case "/items/" + LARGE_MANIFEST_ID -> body = CORTEX_XML.replace("Bibliothek Köln", "Z".repeat(MAX_MANIFEST_BYTES));
+            case "/2/items/" + MALFORMED_XML_ID -> body = "<invalid>";
+            case "/2/items/" + TIMEOUT_ID -> throw new SocketTimeoutException("test timeout");
+            case "/2/items/" + BAD_METS_ID -> body = wrapMets("<not-mets/>");
+            case "/2/items/" + LARGE_METADATA_ID -> body = CORTEX_XML + " ".repeat(MAX_METADATA_BYTES);
+            case "/2/items/" + LARGE_MANIFEST_ID -> body = CORTEX_XML.replace("Bibliothek Köln", "Z".repeat(MAX_MANIFEST_BYTES));
             default -> throw new AssertionError("Unexpected request to " + request.url().encodedPath());
         }
         return response.body(ResponseBody.create(body, okhttp3.MediaType.get("application/xml"))).build();
