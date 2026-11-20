@@ -51,6 +51,10 @@ import org.xml.sax.InputSource;
 import org.xml.sax.SAXException;
 import org.xml.sax.XMLReader;
 
+/**
+ * Lädt externe XML- und JSON-Ressourcen, die die Stylesheets zur Anreicherung von Manifesten verwenden.
+ * Jeder Abruf ist auf öffentliche HTTP(S)-Ziele beschränkt und hat ein Zeit- und Größenlimit.
+ */
 final class CustomResolver implements ResourceResolver, UnparsedTextURIResolver {
 
     private static final int MAX_RESOURCE_BYTES = 8 * 1024 * 1024;
@@ -73,6 +77,10 @@ final class CustomResolver implements ResourceResolver, UnparsedTextURIResolver 
         this.transformationDeadline = transformationDeadline;
     }
 
+    /**
+     * Erstellt einen Resolver mit gemeinsamer Frist für alle externen Abrufe einer Transformation.
+     * Der HTTP-Client und sein Verbindungspool werden weiterverwendet.
+     */
     CustomResolver forTransformation(Duration timeBudget) {
         return new CustomResolver(httpClient, System.nanoTime() + timeBudget.toNanos());
     }
@@ -81,10 +89,15 @@ final class CustomResolver implements ResourceResolver, UnparsedTextURIResolver 
     public SAXSource resolve(ResourceRequest request) throws XPathException {
         final RemoteResource resource = fetch(request.uri, "application/xml, text/xml");
         final InputSource source = new InputSource(new ByteArrayInputStream(resource.content()));
+        // Relative Referenzen beziehen sich auf die URL nach der letzten Weiterleitung.
         source.setSystemId(resource.url().toString());
         return secureXmlSource(source);
     }
 
+    /**
+     * Liest JSON für {@code json-doc()} und {@code unparsed-text()}.
+     * Eine von Saxon angegebene Kodierung hat Vorrang vor dem HTTP-Zeichensatz und dem Standard UTF-8.
+     */
     @Override
     public Reader resolve(URI uri, String encoding, Configuration configuration, boolean fallback) throws XPathException {
         final RemoteResource resource = fetch(uri.toASCIIString(), "application/json");
@@ -104,6 +117,9 @@ final class CustomResolver implements ResourceResolver, UnparsedTextURIResolver 
         }
     }
 
+    /**
+     * Erstellt eine SAX-Quelle für DDB- und Partner-XML mit gesperrten DTDs und externen XML-Ressourcen.
+     */
     static SAXSource secureXmlSource(InputSource source) throws XPathException {
         try {
             final SAXParserFactory factory = SAXParserFactory.newDefaultNSInstance();
@@ -128,6 +144,7 @@ final class CustomResolver implements ResourceResolver, UnparsedTextURIResolver 
 
         HttpUrl url = address == null ? null : HttpUrl.parse(address);
         final long deadline = now + fetchTimeout;
+        // Jede Weiterleitung durchläuft dieselbe Zielprüfung und teilt sich die Abruffrist.
         for (int redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
             validateUrl(url);
             final Request request = new Request.Builder().url(url).header("Accept", accept).build();
@@ -163,7 +180,7 @@ final class CustomResolver implements ResourceResolver, UnparsedTextURIResolver 
         }
 
         final String host = url.host();
-        // OkHttp connects to numeric addresses without invoking the configured DNS resolver.
+        // Für numerische Adressen umgeht OkHttp die DNS-Auflösung. Die Adressprüfung erfolgt hier direkt.
         if (host.indexOf(':') >= 0 || NUMERIC_HOST.matcher(host).matches()) {
             try {
                 if (!isPublicAddress(InetAddress.ofLiteral(host))) {
@@ -175,6 +192,9 @@ final class CustomResolver implements ResourceResolver, UnparsedTextURIResolver 
         }
     }
 
+    /**
+     * Puffert die Antwort bis zum Größenlimit, damit der HTTP-Abruf vor der Verarbeitung abgeschlossen werden kann.
+     */
     private static RemoteResource readResource(HttpUrl url, ResponseBody body) throws IOException, XPathException {
         if (body == null || body.contentLength() > MAX_RESOURCE_BYTES) {
             throw new XPathException("Remote IIIF metadata is missing or exceeds the size limit");
@@ -211,7 +231,7 @@ final class CustomResolver implements ResourceResolver, UnparsedTextURIResolver 
         final int second = Byte.toUnsignedInt(bytes[1]);
         final int third = Byte.toUnsignedInt(bytes[2]);
         if (bytes.length == 4) {
-            // Exclude shared, special-purpose, documentation and reserved IPv4 ranges.
+            // Ergänzt die Standardprüfung um zweckgebundene und reservierte IPv4-Bereiche.
             return first != 0 && first < 224
                     && !(first == 100 && second >= 64 && second < 128)
                     && !(first == 192 && second == 0 && (third == 0 || third == 2))
@@ -220,7 +240,7 @@ final class CustomResolver implements ResourceResolver, UnparsedTextURIResolver 
                     && !(first == 203 && second == 0 && third == 113);
         }
 
-        // Use global unicast IPv6, excluding transition and special-purpose prefixes.
+        // Beschränkt IPv6 auf globale Unicast-Adressen und sperrt Übergangs- und Spezialpräfixe.
         return (first & 0xE0) == 0x20
                 && !(first == 0x20 && second == 0x01 && (third <= 1 || (third == 0x0D && bytes[3] == (byte) 0xB8)))
                 && !(first == 0x20 && second == 0x02)

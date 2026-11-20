@@ -1,5 +1,5 @@
 /*
- * Copyright 2023-2025 Michael Büchner, Deutsche Digitale Bibliothek
+ * Copyright 2023-2026 Michael Büchner, Deutsche Digitale Bibliothek
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 
+/** Liefert die Einstiegsseite mit DDB-Beispielobjekten und Links zu IIIF-Viewern. */
 @Controller
 @RequestMapping({"/", "/index.html"})
 class IiifIndexController {

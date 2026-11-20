@@ -15,9 +15,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 <xsl:stylesheet exclude-result-prefixes="cortex ddblabs j ns3 ns4 source ns5 xs" version="3.0" xmlns="http://www.w3.org/2005/xpath-functions" xmlns:cortex="http://www.deutsche-digitale-bibliothek.de/cortex" xmlns:ddblabs="https://labs.deutsche-digitale-bibliothek.de" xmlns:j="http://www.w3.org/2005/xpath-functions" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:ns3="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:ns4="http://www.deutsche-digitale-bibliothek.de/item" xmlns:ns5="http://www.deutsche-digitale-bibliothek.de/ns/cortex-item-source-description" xmlns:source="http://www.deutsche-digitale-bibliothek.de/ns/cortex-item-source" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+    <!--
+        Erzeugt ein Manifest nach IIIF Presentation API 3.0 aus einem Cortex-Datensatz.
+        Die Cortex-Ansicht liefert Titel und Metadaten, die Binärreferenzen liefern die
+        Reihenfolge und Inhalte der Canvases. Das Ergebnis entspricht der standardisierten
+        XML-Darstellung für JSON. xml-to-json.xsl serialisiert diese Zwischenstruktur.
+    -->
     <xsl:output encoding="UTF-8" method="xml" />
-    <!-- uri of this record -->
+
+    <!-- Der Controller übergibt die öffentliche Manifest-URL. Der Standardwert dient eigenständigen Testläufen. -->
     <xsl:param name="uri">https://labs.deutsche-digitale-bibliothek.de/iiif/presentation/3/ABCDEFGHIJKLMNOPQRSTUVWXYZ012345</xsl:param>
+
+    <!--
+        Canvases, Annotationen und Ranges übernehmen die Umgebung des Manifests.
+        Ihr Pfad steht vor der Query, zum Beispiel /canvas/p1?system=Q1.
+    -->
     <xsl:function name="ddblabs:resource-id" as="xs:string">
         <xsl:param name="path" as="xs:string" />
         <xsl:sequence select="
@@ -26,6 +38,10 @@ limitations under the License.
                 else $uri || $path" />
     </xsl:function>
 
+    <!--
+        IIIF-Metadaten und Zuschreibungen können HTML enthalten. Nur HTTP(S)-Ziele
+        werden verlinkt. Der HTML-Serializer kodiert den Anzeigetext und Attributwerte.
+    -->
     <xsl:function name="ddblabs:link-text" as="xs:string">
         <xsl:param name="label" as="xs:string" />
         <xsl:param name="url" as="xs:string?" />
@@ -42,16 +58,20 @@ limitations under the License.
         <xsl:sequence select="serialize($value, map {'method': 'html'})" />
     </xsl:function>
 
-    <!-- root template -->
+    <!-- Manifest und Cortex-Metadaten -->
+
     <xsl:template match="/">
-        <!-- variables -->
-        <!-- id of this record -->
         <xsl:variable name="id">
             <xsl:value-of select="/cortex:cortex/cortex:properties/cortex:item-id" />
         </xsl:variable>
         <xsl:variable name="provider" select="/cortex:cortex/cortex:provider-info[1]" />
         <xsl:variable name="providerId" select="normalize-space($provider/cortex:provider-ddb-id[1])" />
         <xsl:variable name="providerName" select="normalize-space($provider/cortex:provider-name[1])" />
+
+        <!--
+            Die primäre Binärreferenz aus dem separaten Cortex-Datensatz der Einrichtung dient als Logo.
+            Falls der Datensatz oder das Bild fehlt, bleibt die übrige Anbieterangabe erhalten.
+        -->
         <xsl:variable name="providerLogo" as="xs:string?">
             <xsl:if test="$providerId and $providerName">
                 <xsl:try>
@@ -61,13 +81,19 @@ limitations under the License.
                 </xsl:try>
             </xsl:if>
         </xsl:variable>
+
+        <!--
+            Die Position unter den unterstützten Binärdateien bestimmt die IDs.
+            Canvases werden einmal erzeugt. Startverweis und Ranges verwenden anschließend
+            die IDs der tatsächlich erzeugten Canvases, auch wenn ein Bild ausfällt.
+        -->
         <xsl:variable name="binaries" select="/cortex:cortex/cortex:binaries/cortex:binary[@mimetype = ('image/jpeg', 'application/pdf', 'video/mp4', 'audio/mpeg')]" />
         <xsl:variable name="canvases" as="element(j:map)*">
             <xsl:apply-templates select="$binaries" />
         </xsl:variable>
         <xsl:variable name="canvasIds" select="$canvases/j:string[@key = 'id']/string()" />
         <xsl:variable name="primaryCanvasId" select="ddblabs:resource-id('/canvas/p' || index-of($binaries ! string(@primary), 'true')[1])" />
-        <!-- start of record -->
+
         <map>
             <string key="@context">http://iiif.io/api/presentation/3/context.json</string>
             <string key="id">
@@ -81,7 +107,7 @@ limitations under the License.
                     </string>
                 </array>
             </map>
-            <!-- metadata block -->
+            <!-- Anzeigefelder übernehmen ihre Cortex-Beschriftung und verwenden vorhandene RDF-Links. -->
             <array key="metadata">
                 <xsl:for-each select="/cortex:cortex/cortex:view/ns4:item/ns4:fields[@usage = 'display']/ns4:field">
                     <map>
@@ -104,7 +130,7 @@ limitations under the License.
                     </map>
                 </xsl:for-each>
             </array>
-            <!-- summary block -->
+            <!-- Lieferungen aus Museum und Film verwenden eigene Feld-IDs für die Zusammenfassung. -->
             <xsl:if test="/cortex:cortex/cortex:view/ns4:item/ns4:fields[@usage = 'display']/ns4:field[@id = 'flex_mus_neu_050' or @id = 'flex_film_007']">
                 <map key="summary">
                     <array key="de">
@@ -116,7 +142,7 @@ limitations under the License.
                     </array>
                 </map>
             </xsl:if>
-            <!-- thumbnail block -->
+            <!-- Das primäre JPEG oder ein JPEG mit derselben Cortex-Position dient als Manifestvorschau. -->
             <xsl:variable name="primaryBinary" select="$binaries[@primary = 'true'][1]" />
             <xsl:variable name="thumbId" select="(
                     $primaryBinary[@mimetype = 'image/jpeg']/@ref,
@@ -145,17 +171,15 @@ limitations under the License.
                     </map>
                 </array>
             </xsl:if>
-            <!-- viewingDirection (hard coded) -->
             <string key="viewingDirection">left-to-right</string>
-            <!-- behavior (hard coded) -->
             <array key="behavior">
                 <string>individuals</string>
             </array>
-            <!-- rights of metadata -->
+            <!-- Die Lizenzreferenz stammt aus dem RDF-Attribut der Cortex-Ansicht. -->
             <string key="rights">
                 <xsl:value-of select="/cortex:cortex/cortex:view/ns4:item/ns4:license/@ns3:resource" />
             </string>
-            <!-- requiredStatement -->
+            <!-- Die Zuschreibung verlinkt den Namen der Institution möglichst mit der Herkunfts-URL. -->
             <map key="requiredStatement">
                 <map key="label">
                     <array key="en">
@@ -175,7 +199,7 @@ limitations under the License.
                     </array>
                 </map>
             </map>
-            <!-- provider -->
+            <!-- Die DDB-Organisation wird zum IIIF-Agent, sobald ID und Name vorliegen. -->
             <xsl:if test="$providerId and $providerName">
                 <array key="provider">
                     <map>
@@ -253,7 +277,7 @@ limitations under the License.
                     </map>
                 </array>
             </xsl:if>
-            <!-- homepage -->
+            <!-- Die DDB-Objektseite führt zur öffentlichen Ansicht des Datensatzes. -->
             <array key="homepage">
                 <map>
                     <string key="id">
@@ -269,8 +293,10 @@ limitations under the License.
                     <string key="format">text/html</string>
                 </map>
             </array>
-            <!-- logo -->
-            <!-- TODO: logo at this position is not IIIF Presentation v3 valid, but Mirador 3 will display a logo (which is nice) -->
+            <!--
+                Das Logo beim Agent ist die reguläre Anbieterangabe nach IIIF Presentation 3.
+                Die zusätzliche Angabe auf Manifestebene erhält die Logoanzeige in Mirador 3.
+            -->
             <xsl:if test="$providerLogo">
                 <array key="logo">
                     <map>
@@ -294,7 +320,7 @@ limitations under the License.
                     </map>
                 </array>
             </xsl:if>
-            <!-- seeAlso -->
+            <!-- seeAlso verweist auf die maschinenlesbaren Cortex-Metadaten. -->
             <array key="seeAlso">
                 <map>
                     <string key="id">
@@ -306,23 +332,13 @@ limitations under the License.
                     <string key="profile">https://www.deutsche-digitale-bibliothek.de/ns/cortex</string>
                 </map>
             </array>
-            <!-- rendering -->
-            <!-- 
-            "rendering": [
-                {
-                    "id": "https://api.deutsche-digitale-bibliothek.de/binary/8fac26ef-8b2d-47ef-94c3-259326c82ac4.pdf",
-                    "type": "Text",
-                    "label":
-                    {
-                        "de": ["PDF-Ansicht"]
-                    },
-                    "format": "application/pdf"
-                }
-            ],
+            <!--
+                rendering sammelt alternative Ansichten zum Manifest. PDF-Dateien und
+                Vimeo-Videos kommen aus den Binärreferenzen. Liegt die Seiten-ID einer
+                METS-Struktureinheit vor, führt sie im DFG-Viewer zur bezeichneten Seite.
             -->
             <xsl:if test="/cortex:cortex/cortex:binaries/cortex:binary[@mimetype = 'application/pdf'] or /cortex:cortex/cortex:binaries/cortex:binary[@mimetype = 'video/vnd.ddbkultur.vimeo'] or /cortex:cortex/source:source/source:description/ns5:record/ns5:id[@type = 'mets:div/@ID']/@value">
                 <array key="rendering">
-                    <!-- PDF -->
                     <xsl:if test="/cortex:cortex/cortex:binaries/cortex:binary[@mimetype = 'application/pdf']">
                         <xsl:for-each select="/cortex:cortex/cortex:binaries/cortex:binary[@mimetype = 'application/pdf']">
                             <map>
@@ -341,7 +357,6 @@ limitations under the License.
                             </map>
                         </xsl:for-each>
                     </xsl:if>
-                    <!-- Vimeo-Video -->
                     <xsl:if test="/cortex:cortex/cortex:binaries/cortex:binary[@mimetype = 'video/vnd.ddbkultur.vimeo']">
                         <xsl:for-each select="/cortex:cortex/cortex:binaries/cortex:binary[@mimetype = 'video/vnd.ddbkultur.vimeo']">
                             <map>
@@ -359,7 +374,6 @@ limitations under the License.
                             </map>
                         </xsl:for-each>
                     </xsl:if>
-                    <!-- DFG-Viewer -->
                     <xsl:if test="/cortex:cortex/source:source/source:description/ns5:record/ns5:id[@type = 'mets:div/@ID']/@value">
                         <map>
                             <string key="id">
@@ -379,6 +393,7 @@ limitations under the License.
                     </xsl:if>
                 </array>
             </xsl:if>
+            <!-- Ohne erzeugten primären Canvas verweist start auf den ersten verfügbaren Canvas. -->
             <xsl:if test="exists($canvasIds)">
                 <map key="start">
                     <string key="id">
@@ -390,7 +405,7 @@ limitations under the License.
             <array key="items">
                 <xsl:sequence select="$canvases" />
             </array>
-            <!-- structures -->
+            <!-- Die Übersicht enthält eine Range pro verfügbarem Canvas in Cortex-Reihenfolge. -->
             <xsl:if test="exists($canvases)">
                 <array key="structures">
                     <map>
@@ -451,10 +466,15 @@ limitations under the License.
                     </map>
                 </array>
             </xsl:if>
-            <!--  -->
         </map>
     </xsl:template>
-    <!-- template for images -->
+
+    <!-- Canvas-Vorlagen nach Medientyp -->
+
+    <!--
+        JPEG-Canvases benötigen Breite und Höhe aus info.json des DDB-Bilddienstes.
+        Fehlen gültige Maße, wird nur dieser Canvas ausgelassen. Die übrigen Medien bleiben darstellbar.
+    -->
     <xsl:template match="/cortex:cortex/cortex:binaries/cortex:binary[@mimetype = 'image/jpeg']">
         <xsl:try>
             <xsl:variable name="infoJsonUrl">
@@ -504,7 +524,6 @@ limitations under the License.
                         </string>
                         <string key="type">AnnotationPage</string>
                         <array key="items">
-                            <!-- images and pdf (pdf always have a preview image) -->
                             <map>
                                 <string key="id">
                                     <xsl:value-of select="ddblabs:resource-id('/annotation/p000' || position() || '-image')" />
@@ -573,7 +592,7 @@ limitations under the License.
                         </array>
                     </map>
                 </array>
-                <!-- thumbnail -->
+                <!-- Der Canvas verweist als Vorschau direkt auf denselben IIIF-Bilddienst. -->
                 <array key="thumbnail">
                     <map>
                         <string key="id">
@@ -599,7 +618,8 @@ limitations under the License.
             <xsl:catch errors="*" />
         </xsl:try>
     </xsl:template>
-    <!-- template for pdf -->
+
+    <!-- PDF-Canvases verlinken das Originaldokument über die Binary-API. -->
     <xsl:template match="/cortex:cortex/cortex:binaries/cortex:binary[@mimetype = 'application/pdf']">
         <map>
             <string key="id">
@@ -686,7 +706,7 @@ limitations under the License.
                     </array>
                 </map>
             </array>
-            <!-- thumbnail, because every PDF does have a thumbnail -->
+            <!-- Die PDF-Referenz dient beim DDB-Bilddienst auch als ID des Vorschaubilds. -->
             <array key="thumbnail">
                 <map>
                     <string key="id">
@@ -710,7 +730,8 @@ limitations under the License.
             </array>
         </map>
     </xsl:template>
-    <!-- template for video -->
+
+    <!-- Video-Canvases binden die MP4-Datei aus der Binary-API als Painting-Annotation ein. -->
     <xsl:template match="/cortex:cortex/cortex:binaries/cortex:binary[@mimetype = 'video/mp4']">
         <map>
             <string key="id">
@@ -738,10 +759,6 @@ limitations under the License.
                     </string>
                 </array>
             </map>
-            <!-- we don't know the duration, resolution etc. and we'll never know -->
-            <!-- <number key="height">360</number> -->
-            <!-- <number key="width">480</number> -->
-            <!-- <number key="duration">321.0</number> -->
             <array key="items">
                 <map>
                     <string key="id">
@@ -749,7 +766,6 @@ limitations under the License.
                     </string>
                     <string key="type">AnnotationPage</string>
                     <array key="items">
-                        <!-- videos -->
                         <map>
                             <string key="id">
                                 <xsl:value-of select="ddblabs:resource-id('/annotation/p000' || position() || '-video')" />
@@ -763,10 +779,6 @@ limitations under the License.
                                     <xsl:text>.mp4</xsl:text>
                                 </string>
                                 <string key="type">Video</string>
-                                <!-- we don't know the duration, resolution etc. and we'll never know -->
-                                <!-- <number key="height">360</number> -->
-                                <!-- <number key="width">480</number> -->
-                                <!-- <number key="duration">321.0</number> -->
                                 <string key="format">video/mp4</string>
                             </map>
                             <string key="target">
@@ -776,7 +788,7 @@ limitations under the License.
                     </array>
                 </map>
             </array>
-            <!-- thumbnail, because every video does have a thumbnail -->
+            <!-- Die Cortex-Position ordnet dem Video ein separat geliefertes Vorschaubild zu. -->
             <xsl:if test="/cortex:cortex/cortex:binaries/cortex:binary[@position = current()/@position and @mimetype = 'image/jpeg']/@ref">
                 <array key="thumbnail">
                     <map>
@@ -802,7 +814,8 @@ limitations under the License.
             </xsl:if>
         </map>
     </xsl:template>
-    <!-- template for audio -->
+
+    <!-- Audiodateien des Typs audio/mpeg werden als MP3 über die Binary-API verlinkt. -->
     <xsl:template match="/cortex:cortex/cortex:binaries/cortex:binary[@mimetype = 'audio/mpeg']">
         <map>
             <string key="id">
@@ -837,7 +850,6 @@ limitations under the License.
                     </string>
                     <string key="type">AnnotationPage</string>
                     <array key="items">
-                        <!-- audio -->
                         <map>
                             <string key="id">
                                 <xsl:value-of select="ddblabs:resource-id('/annotation/p000' || position() || '-sound')" />
@@ -851,7 +863,6 @@ limitations under the License.
                                     <xsl:text>.mp3</xsl:text>
                                 </string>
                                 <string key="type">Sound</string>
-                                <!-- <number key="duration">96.0</number> -->
                                 <string key="format">audio/mpeg</string>
                             </map>
                             <string key="target">
@@ -861,7 +872,7 @@ limitations under the License.
                     </array>
                 </map>
             </array>
-            <!-- thumbnail, because audio may have a thumbnail -->
+            <!-- Wenn ein JPEG dieselbe Cortex-Position hat, dient es als Audiovorschau. -->
             <xsl:if test="/cortex:cortex/cortex:binaries/cortex:binary[@position = current()/@position and @mimetype = 'image/jpeg']/@ref">
                 <array key="thumbnail">
                     <map>
@@ -887,6 +898,6 @@ limitations under the License.
             </xsl:if>
         </map>
     </xsl:template>
-    <!-- default template -->
+    <!-- Die leere Standardvorlage verwirft freie Textknoten und Attribute aus der Cortex-Quelle. -->
     <xsl:template match="text() | @*" />
 </xsl:stylesheet>

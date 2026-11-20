@@ -1,5 +1,5 @@
 /*
- * Copyright 2023-2025 Michael Büchner, Deutsche Digitale Bibliothek
+ * Copyright 2023-2026 Michael Büchner, Deutsche Digitale Bibliothek
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package de.ddb.labs.iiif;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
+/** Einstiegspunkt für den Spring-Boot-Dienst der IIIF Presentation API. */
 @SpringBootApplication
 public class IiifApplication {
 

@@ -62,6 +62,11 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.xml.sax.InputSource;
 
+/**
+ * Erzeugt Manifeste der IIIF Presentation API 3 aus DDB-Metadaten.
+ * Die XPath-Ausdrücke und Stylesheets werden beim Start kompiliert und wiederverwendet.
+ * Parser, XPath-Selektoren und Transformer entstehen pro Anfrage.
+ */
 @RestController
 @CrossOrigin(origins = "*", allowedHeaders = "*", maxAge = 3600)
 class IiifRestController {
@@ -101,6 +106,7 @@ class IiifRestController {
                 .connectTimeout(Duration.ofSeconds(5))
                 .readTimeout(Duration.ofSeconds(10))
                 .callTimeout(Duration.ofSeconds(30))
+                // Verhindert, dass eine Weiterleitung die authentifizierte Anfrage an ein anderes Ziel lenkt.
                 .followRedirects(false)
                 .build());
     }
@@ -145,6 +151,15 @@ class IiifRestController {
         }
     }
 
+    /**
+     * Liefert das Manifest für ein DDB-Objekt. Bei Anfragen an Q1 oder Q2 trägt die
+     * Manifest-ID die gewählte Testumgebung im Parameter {@code system}.
+     *
+     * @param request HTTP-Anfrage zur Ermittlung des Kontextpfads
+     * @param id Base32-kodierte DDB-Objekt-ID
+     * @param system optionale Testumgebung {@code Q1} oder {@code Q2}, andernfalls gilt Produktion
+     * @return vollständiges UTF-8-Manifest oder JSON-Fehler mit passendem HTTP-Status
+     */
     @GetMapping(path = "/{id:[^.]+}", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<?> getResource(HttpServletRequest request, @PathVariable String id,
                                          @RequestParam(required = false) String system) {
@@ -198,6 +213,7 @@ class IiifRestController {
                     return error(HttpStatus.BAD_GATEWAY, "DDB API request failed");
                 }
                 final InputSource input = new InputSource(new MetadataInput(response.body().byteStream(), maxMetadataBytes));
+                // Saxon erhält die Endpunkt-URL als Auflösungsbasis. Der API-Schlüssel verbleibt in der HTTP-Anfrage.
                 input.setSystemId(apiUrl.toString());
                 document = builder.build(CustomResolver.secureXmlSource(input));
             }
@@ -228,6 +244,7 @@ class IiifRestController {
         }
         final XdmNode record = (XdmNode) select(sourceRecord, cortex);
         if (record != null && METS_NAMESPACE.equalsIgnoreCase(record.attribute("type"))) {
+            // DDB liefert METS als eingebettetes XML oder als Text, optional innerhalb eines OAI-PMH-Datensatzes.
             final XdmNode inline = (XdmNode) select(inlineMetadata, record);
             final XdmNode metsDocument;
             if (inline == null) {
@@ -253,6 +270,7 @@ class IiifRestController {
             transformer.setDestination(processor.newSerializer(output));
             transformer.transform();
         } else {
+            // Der Cortex-Pfad erzeugt zuerst die XML-Repräsentation für die Funktion xml-to-json().
             final XdmDestination intermediate = new XdmDestination();
             final XsltTransformer transformer = transformer(cortexToIiif);
             transformer.setParameter(new QName("uri"), new XdmAtomicValue(manifestUrl));
@@ -267,6 +285,7 @@ class IiifRestController {
         }
     }
 
+    /** Bindet XML- und JSON-Abrufe an dasselbe Zeitbudget der Transformation. */
     private XsltTransformer transformer(XsltExecutable stylesheet) {
         final XsltTransformer transformer = stylesheet.load();
         final CustomResolver transformationResolver = resolver.forTransformation(Duration.ofMinutes(5));
@@ -290,6 +309,7 @@ class IiifRestController {
         return error(HttpStatus.GATEWAY_TIMEOUT, "DDB API request timed out");
     }
 
+    /** Begrenzt die vom Parser gelesenen Bytes auch bei Antworten ohne HTTP-Längenangabe. */
     private static final class MetadataInput extends InputStream {
 
         private final InputStream source;
@@ -311,6 +331,7 @@ class IiifRestController {
 
         @Override
         public int read(byte[] bytes, int offset, int length) throws IOException {
+            // Ein weiteres Byte unterscheidet eine Antwort am Limit von einer zu großen Antwort.
             final int count = source.read(bytes, offset, (int) Math.min(length, remaining + 1));
             if (count > 0) {
                 consume(count);
@@ -331,6 +352,7 @@ class IiifRestController {
         }
     }
 
+    /** Puffert das Manifest bis zum Byte-Limit, damit der HTTP-Status erst nach der Serialisierung feststeht. */
     private static final class ManifestOutput extends FastByteArrayOutputStream {
 
         private final int maxBytes;

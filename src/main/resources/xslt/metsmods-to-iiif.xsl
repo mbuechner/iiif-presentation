@@ -34,6 +34,10 @@ limitations under the License.
         die Seiten in Lesereihenfolge, fileSec ihre Bilddateien und amdSec die MIX-Metadaten.
         Die LOGICAL-Gliederung bildet das Inhaltsverzeichnis. structLink verbindet
         dessen Abschnitte mit den angezeigten Seiten.
+
+        Der Java-Controller extrahiert vorab das METS-Dokument aus Cortex und löst bei
+        Bedarf die OAI-PMH-Hülle auf. Dieses Stylesheet serialisiert die IIIF-Map direkt
+        als JSON. Die Cortex-Transformation nutzt dafür einen eigenen XML-Zwischenschritt.
     -->
     <xsl:output method="json" encoding="UTF-8" indent="yes" use-character-maps="no-escape-slash" />
     <xsl:strip-space elements="*" />
@@ -42,7 +46,8 @@ limitations under the License.
     </xsl:character-map>
 
     <!--
-        Der Controller übergibt die DDB-Objekt-ID und die öffentliche Manifest-URL.
+        Der Controller übergibt die DDB-Objekt-ID für die Links zum DDB-Objekt und
+        die öffentliche Manifest-URL als Basis für Canvases, Annotationen und Ranges.
         Die Beispielwerte ermöglichen einen eigenständigen Testlauf des Stylesheets.
         Angaben zur liefernden Einrichtung kommen optional aus dem Cortex-Datensatz.
     -->
