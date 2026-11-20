@@ -1,0 +1,179 @@
+name: Check HTTP container
+description: Probe HTTP startup and scan the local image and its optional CycloneDX SBOM.
+
+inputs:
+  image:
+    description: Local image tag or already pulled registry digest.
+    required: true
+  port:
+    description: TCP port inside the container.
+    default: '8080'
+  path:
+    description: HTTP request path that must respond with a 2xx status.
+    default: '/'
+  sbom-path:
+    description: Absolute CycloneDX JSON path to check if present. An empty value disables the SBOM scan.
+    default: '/opt/iiif/bom.json'
+  severity:
+    description: Comma-separated vulnerability severities to report.
+    default: 'HIGH,CRITICAL'
+  exit-code:
+    description: Use 1 to block on findings with a fix or 0 to report them.
+    default: '1'
+
+runs:
+  using: composite
+  steps:
+    - name: Probe container startup and collect the optional SBOM
+      id: smoke
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        CONTAINER_PORT: ${{ inputs.port }}
+        HTTP_PATH: ${{ inputs.path }}
+        SBOM_PATH: ${{ inputs.sbom-path }}
+        RELEASE_EXIT_CODE: ${{ inputs.exit-code }}
+      run: |
+        if [[ ! "$CONTAINER_PORT" =~ ^[1-9][0-9]{0,4}$ ]] || (( CONTAINER_PORT > 65535 )); then
+          echo '::error::port must be an integer from 1 to 65535.'
+          exit 1
+        fi
+        if [[ "$HTTP_PATH" != /* || ( -n "$SBOM_PATH" && "$SBOM_PATH" != /* ) ]]; then
+          echo '::error::path and any sbom-path must start with /.'
+          exit 1
+        fi
+        if [[ "$RELEASE_EXIT_CODE" != 0 && "$RELEASE_EXIT_CODE" != 1 ]]; then
+          echo '::error::exit-code must be 0 or 1.'
+          exit 1
+        fi
+
+        # Smoke-test the same local image ID Trivy will scan, even if a tag changes.
+        image_id="$(docker image inspect --format '{{.Id}}' -- "$IMAGE")"
+        scan_dir="$(mktemp -d "$RUNNER_TEMP/iiif-container-check.XXXXXX")"
+        printf 'image-id=%s\nscan-dir=%s\n' "$image_id" "$scan_dir" >> "$GITHUB_OUTPUT"
+        cid_file="$scan_dir/container.cid"
+
+        remove_container() {
+          local status=$?
+          if [[ -s "$cid_file" ]]; then
+            local container
+            container="$(<"$cid_file")"
+            if (( status != 0 )); then
+              docker inspect --format '{{json .State}}' "$container" >&2 || true
+              docker logs --tail 80 "$container" 2>&1 | sed 's/^/container | /' >&2 || true
+            fi
+            docker rm --force "$container" >/dev/null || true
+          fi
+        }
+        trap remove_container EXIT
+
+        docker run --detach --pull never --cidfile "$cid_file" \
+          --publish "127.0.0.1::${CONTAINER_PORT}" -- "$image_id" >/dev/null
+        container="$(<"$cid_file")"
+        address="$(docker port "$container" "${CONTAINER_PORT}/tcp")"
+        deadline=$((SECONDS + 30))
+        while true; do
+          status=$(curl --silent --globoff --noproxy '*' --connect-timeout 1 --max-time 2 \
+            --output /dev/null --write-out '%{http_code}' "http://${address}${HTTP_PATH}") || status=000
+          if [[ "$status" == 2[0-9][0-9] ]]; then
+            break
+          fi
+          if (( SECONDS >= deadline )) || [[ "$(docker inspect --format '{{.State.Running}}' "$container")" != true ]]; then
+            echo "::error::Container failed its HTTP probe (last status $status)."
+            exit 1
+          fi
+          sleep 1
+        done
+
+        sbom_present=false
+        if [[ -n "$SBOM_PATH" ]]; then
+          sbom="$scan_dir/bom.json"
+          copy_error="$scan_dir/sbom-copy-error"
+          if docker cp "$container:$SBOM_PATH" "$sbom" 2>"$copy_error"; then
+            if [[ ! -f "$sbom" || -L "$sbom" ]] || ! jq -e \
+              '.bomFormat == "CycloneDX" and (.components | type == "array" and length > 0)' "$sbom" >/dev/null; then
+              echo '::error::Expected a CycloneDX JSON SBOM with components.'
+              exit 1
+            fi
+            sbom_present=true
+          elif grep -Fq -- "Could not find the file $SBOM_PATH in container $container" "$copy_error"; then
+            echo '::notice::The candidate image has no application SBOM to scan.'
+          else
+            cat "$copy_error" >&2
+            exit 1
+          fi
+        fi
+        printf 'sbom-present=%s\n' "$sbom_present" >> "$GITHUB_OUTPUT"
+
+    - name: Scan the local image
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      env:
+        TRIVY_IMAGE_SRC: docker
+      with:
+        version: v0.76.2
+        scan-type: image
+        scan-ref: ${{ steps.smoke.outputs.image-id }}
+        scanners: vuln
+        severity: ${{ inputs.severity }}
+        timeout: 5m
+        format: json
+        exit-code: '0'
+        output: ${{ steps.smoke.outputs.scan-dir }}/image-results.json
+
+    - name: Scan the application SBOM
+      if: steps.smoke.outputs.sbom-present == 'true'
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        skip-setup-trivy: 'true'
+        scan-type: sbom
+        scan-ref: ${{ steps.smoke.outputs.scan-dir }}/bom.json
+        scanners: vuln
+        severity: ${{ inputs.severity }}
+        timeout: 5m
+        format: json
+        exit-code: '0'
+        output: ${{ steps.smoke.outputs.scan-dir }}/sbom-results.json
+
+    - name: Summarize findings and apply release policy
+      shell: bash
+      env:
+        SCAN_DIR: ${{ steps.smoke.outputs.scan-dir }}
+        SBOM_PRESENT: ${{ steps.smoke.outputs.sbom-present }}
+        RELEASE_EXIT_CODE: ${{ inputs.exit-code }}
+      run: |
+        reports=("$SCAN_DIR/image-results.json")
+        if [[ "$SBOM_PRESENT" == true ]]; then
+          reports+=("$SCAN_DIR/sbom-results.json")
+        fi
+        for report in "${reports[@]}"; do
+          jq -e '(.SchemaVersion | type == "number") and ((.Results // []) | type == "array")' "$report" >/dev/null
+        done
+
+        findings="$(jq --slurp '[.[] | .Results[]? | .Vulnerabilities[]?] |
+          unique_by(.VulnerabilityID, .PkgName, .InstalledVersion, .FixedVersion, .Severity)' "${reports[@]}")"
+        fixable="$(jq '[.[] | select((.FixedVersion // "") != "")] | length' <<< "$findings")"
+        {
+          echo '### Container vulnerabilities'
+          echo
+          echo '| Advisory | Package | Installed | Severity | Fixed version |'
+          echo '| --- | --- | --- | --- | --- |'
+          jq -r '.[] | [.VulnerabilityID, .PkgName, .InstalledVersion, .Severity, (.FixedVersion // "")] |
+            map(tostring | gsub("[\r\n]+"; " ") | gsub("\\|"; "&#124;") | gsub("<"; "&lt;") | gsub(">"; "&gt;")) |
+            "| " + join(" | ") + " |"' <<< "$findings"
+          echo
+          printf 'Findings with an available fix: %s\n' "$fixable"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [[ "$RELEASE_EXIT_CODE" == 1 ]] && (( fixable > 0 )); then
+          echo '::error::Fixable vulnerabilities block promotion. See the job summary.'
+          exit 1
+        fi
+
+    - name: Remove temporary container check files
+      if: always() && steps.smoke.outputs.scan-dir != ''
+      shell: bash
+      env:
+        SCAN_DIR: ${{ steps.smoke.outputs.scan-dir }}
+      run: |
+        rm -f -- "$SCAN_DIR"/{container.cid,bom.json,sbom-copy-error,image-results.json,sbom-results.json}
+        rmdir -- "$SCAN_DIR"

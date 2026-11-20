@@ -1,4 +1,4 @@
-[![Java CI with Maven](https://github.com/mbuechner/iiif/actions/workflows/maven.yml/badge.svg)](https://github.com/mbuechner/iiif/actions/workflows/maven.yml) [![Docker](https://github.com/mbuechner/iiif/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/mbuechner/iiif/actions/workflows/docker-publish.yml)
+[![Java CI with Maven](https://github.com/mbuechner/iiif-presentation/actions/workflows/maven.yml/badge.svg)](https://github.com/mbuechner/iiif-presentation/actions/workflows/maven.yml) [![Docker](https://github.com/mbuechner/iiif-presentation/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/mbuechner/iiif-presentation/actions/workflows/docker-publish.yml)
 
 # IIIF
 
@@ -6,7 +6,7 @@ This service generates IIIF Presentation API 3.0 manifests from Deutsche Digital
 
 ## Local build and run
 
-Install JDK 25 LTS and use the Maven wrapper to build and run the tests.
+Install Amazon Corretto 25 LTS and use the Maven wrapper to build and run the tests.
 
 ```sh
 ./mvnw verify
@@ -23,10 +23,20 @@ Set these options through environment variables or a local `.env` file. The file
 ## Docker
 
 ```sh
-docker build --pull --tag iiif .
+docker build --platform linux/amd64 --pull --tag iiif .
 docker run --rm --publish 8080:8080 iiif
 ```
 
 Use `--env-file .env` to pass optional settings to the container from a local file.
 
-GitHub Actions publishes the image to `ghcr.io/mbuechner/iiif/iiif`. The `latest` tag tracks `main`, and release images have a version tag and the `tagged` alias.
+The container runs as UID and GID `10001` and listens on port `8080` by default.
+Maven builds it in `maven:3-amazoncorretto-25`, and it runs on `amazoncorretto:25`.
+An online Maven `verify` writes the CycloneDX SBOM to `target/bom.json`.
+
+## Container releases
+
+- Publishing a stable release queues the workflow on `main` if the tagged commit contains the trigger. For manual runs, use **Actions → Docker** on `main` with optional `release_tag`. Builds use the tagged source, Dockerfile, and commit timestamp.
+- Daily at **06:17 UTC**, rebuild if the release commit or either `linux/amd64` base digest changed, or the version tag is missing. Otherwise rescan the existing digest.
+- HTTP probe → Trivy (image + optional SBOM) → Cosign → `ghcr.io/mbuechner/iiif/iiif:<release_tag>`. Fixable High/Critical CVEs block promotion. The maintained release also gets `latest` and `tagged`.
+
+Grant the repository write access under GHCR **Manage Actions access**. Set `CONTAINER_RELEASE_TAG` to override the latest stable release and `CONTAINER_HTTP_PATH` to override `/`.

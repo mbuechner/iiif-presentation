@@ -1,52 +1,245 @@
 name: Docker
 
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
-  pull_request:
-    branches: [main]
+  release:
+    types: [published]
+  schedule:
+    - cron: '17 6 * * *'
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published release tag. Leave empty to check the maintained release.
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  PLATFORM: linux/amd64
 
 jobs:
-  build:
-    if: github.event_name != 'push'
-    runs-on: ubuntu-latest
+  dispatch-release:
+    name: Queue published release on the default branch
+    if: github.event_name == 'release' && !github.event.release.prerelease && !github.event.release.draft
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
-      contents: read
+      actions: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Build and test the image
-        run: docker build --pull .
+      - name: Dispatch the default-branch workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh workflow run docker-publish.yml --repo "$GITHUB_REPOSITORY" --ref "$DEFAULT_BRANCH" \
+            --raw-field "release_tag=$RELEASE_TAG"
+
+  select-release:
+    name: Select a stable release
+    if: github.event_name != 'release' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - name: Resolve selected or maintained release tag
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REQUESTED_RELEASE: ${{ inputs.release_tag }}
+          MAINTAINED_RELEASE: ${{ vars.CONTAINER_RELEASE_TAG }}
+        shell: bash
+        run: |
+          valid_tag() {
+            [[ "$1" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$ && "$1" != latest && "$1" != tagged ]]
+          }
+
+          requested="${REQUESTED_RELEASE:-$MAINTAINED_RELEASE}"
+          endpoint="repos/$GITHUB_REPOSITORY/releases/latest"
+          if [[ -n "$requested" ]]; then
+            if ! valid_tag "$requested"; then
+              echo '::error::Use a release tag that is also a valid container tag, such as v0.1.0.'
+              exit 1
+            fi
+            endpoint="repos/$GITHUB_REPOSITORY/releases/tags/$requested"
+          fi
+
+          if ! tag="$(gh api "$endpoint" --jq 'select(.published_at != null and .draft == false and .prerelease == false) | .tag_name' 2>&1)"; then
+            if [[ -z "$requested" && "$tag" == *'HTTP 404'* ]]; then
+              echo 'No stable release has been published.' >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            printf '%s\n' "$tag" >&2
+            exit 1
+          fi
+          if ! valid_tag "$tag"; then
+            echo '::error::Choose a published stable release with a valid container tag.'
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
   publish:
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
+    name: Check and publish the container
+    needs: select-release
+    if: needs.select-release.outputs.tag != ''
+    concurrency:
+      group: container-publish
+      queue: max
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
     permissions:
       contents: read
       packages: write
+      id-token: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check out workflow tools from the default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Build and test the image
-        run: docker build --pull --tag iiif --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" .
-      - name: Log into the container registry
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-      - name: Push the image
+      - name: Check out the tagged release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ needs.select-release.outputs.tag }}
+          path: release-source
+          persist-credentials: false
+      - name: Identify the release commit and its timestamps
+        id: source
+        shell: bash
         run: |
-          image="ghcr.io/${GITHUB_REPOSITORY,,}/iiif"
-          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            version="${GITHUB_REF_NAME#v}"
-            docker tag iiif "$image:$version"
-            docker push "$image:$version"
-            docker tag iiif "$image:tagged"
-            docker push "$image:tagged"
-          else
-            docker tag iiif "$image:latest"
-            docker push "$image:latest"
+          revision="$(git -C release-source rev-parse HEAD)"
+          epoch="$(git -C release-source show -s --format=%ct HEAD)"
+          created="$(date --utc --date="@$epoch" '+%Y-%m-%dT%H:%M:%SZ')"
+          {
+            echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/iiif/iiif"
+            echo "revision=$revision"
+            echo "epoch=$epoch"
+            echo "created=$created"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Log in to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compare release and platform-specific base image digests
+        id: bases
+        env:
+          IMAGE: ${{ steps.source.outputs.image }}
+          RELEASE_TAG: ${{ needs.select-release.outputs.tag }}
+          RELEASE_REVISION: ${{ steps.source.outputs.revision }}
+        run: python3 .github/scripts/container-build-inputs.py
+
+      - name: Build and stage the candidate by digest
+        id: candidate
+        if: steps.bases.outputs.build_required == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.source.outputs.epoch }}
+        with:
+          context: release-source
+          build-contexts: ${{ steps.bases.outputs.contexts }}
+          platforms: ${{ env.PLATFORM }}
+          pull: true
+          provenance: false
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.created=${{ steps.source.outputs.created }}
+            org.opencontainers.image.revision=${{ steps.source.outputs.revision }}
+            org.opencontainers.image.version=${{ needs.select-release.outputs.tag }}
+            org.opencontainers.image.base.name=${{ steps.bases.outputs.base_name }}
+            org.opencontainers.image.base.digest=${{ steps.bases.outputs.base_digest }}
+            de.ddb.labs.iiif.build-inputs=${{ steps.bases.outputs.fingerprint }}
+          outputs: type=image,name=${{ steps.source.outputs.image }},push=true,push-by-digest=true,name-canonical=true,oci-mediatypes=true,rewrite-timestamp=true
+          cache-from: type=gha,scope=iiif
+          cache-to: type=gha,scope=iiif,mode=max
+
+      - name: Pull the candidate by its immutable digest
+        id: image
+        env:
+          IMAGE: ${{ steps.source.outputs.image }}
+          DIGEST: ${{ steps.candidate.outputs.digest || steps.bases.outputs.existing_digest }}
+        shell: bash
+        run: |
+          if [[ ! "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo '::error::No valid candidate image digest was selected.'
+            exit 1
           fi
+          docker pull --platform "$PLATFORM" "$IMAGE@$DIGEST"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the HTTP endpoint and scan the image
+        uses: ./.github/actions/check-container
+        with:
+          image: ${{ steps.source.outputs.image }}@${{ steps.image.outputs.digest }}
+          port: '8080'
+          path: ${{ vars.CONTAINER_HTTP_PATH || '/' }}
+          sbom-path: /opt/iiif/bom.json
+
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+      - name: Sign the checked digest and promote its tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ steps.source.outputs.image }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+          RELEASE_TAG: ${{ needs.select-release.outputs.tag }}
+          RELEASE_REVISION: ${{ steps.source.outputs.revision }}
+          MAINTAINED_RELEASE: ${{ vars.CONTAINER_RELEASE_TAG }}
+        shell: bash
+        run: |
+          releases="repos/$GITHUB_REPOSITORY/releases"
+          published="$(gh api "$releases/tags/$RELEASE_TAG" \
+            --jq 'select(.published_at != null and .draft == false and .prerelease == false) | .tag_name')"
+          current_source="$(gh api "repos/$GITHUB_REPOSITORY/commits/refs%2Ftags%2F$RELEASE_TAG" --jq '.sha')"
+          if [[ "$published" != "$RELEASE_TAG" || "$current_source" != "$RELEASE_REVISION" ]]; then
+            echo '::error::The release or Git tag changed during the check.'
+            exit 1
+          fi
+
+          # Resolve GitHub's latest release again before updating the shared aliases.
+          maintained="$MAINTAINED_RELEASE"
+          if [[ -z "$maintained" ]]; then
+            if ! maintained="$(gh api "$releases/latest" --jq '.tag_name' 2>&1)"; then
+              if [[ "$maintained" != *'HTTP 404'* ]]; then
+                printf '%s\n' "$maintained" >&2
+                exit 1
+              fi
+              maintained=''
+            fi
+          fi
+
+          tags=("$IMAGE:$RELEASE_TAG")
+          if [[ "$RELEASE_TAG" == "$maintained" ]]; then
+            tags+=("$IMAGE:latest" "$IMAGE:tagged")
+          fi
+          promotion=()
+          for tag in "${tags[@]}"; do
+            if ! current="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$tag" 2>&1)"; then
+              if [[ "${current,,}" == *"${tag,,}: not found"* || "${current,,}" == *'manifest unknown'* ]]; then
+                current=''
+              else
+                printf '%s\n' "$current" >&2
+                exit 1
+              fi
+            fi
+            if [[ "$current" != "$DIGEST" ]]; then
+              promotion+=(--tag "$tag")
+            fi
+          done
+          if (( ${#promotion[@]} == 0 )); then
+            printf 'Checked existing digest: %s@%s\n' "$IMAGE" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          cosign sign --yes "$IMAGE@$DIGEST"
+          docker buildx imagetools create --prefer-index=false "${promotion[@]}" "$IMAGE@$DIGEST"
+          for tag in "${tags[@]}"; do
+            if [[ "$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$tag")" != "$DIGEST" ]]; then
+              echo "::error::The promoted digest for $tag differs from the checked digest."
+              exit 1
+            fi
+          done
+          printf 'Promoted checked digest: %s@%s\n' "$IMAGE" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
