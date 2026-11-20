@@ -6,8 +6,9 @@ COPY .mvn/ .mvn/
 COPY --chmod=755 mvnw .
 COPY pom.xml .
 COPY src/ src/
+# The base image's MAVEN_CONFIG directory would become a Maven CLI argument.
 RUN --mount=type=cache,target=/root/.m2 \
-    ./mvnw --batch-mode --no-transfer-progress \
+    MAVEN_CONFIG= ./mvnw --batch-mode --no-transfer-progress \
     ${SOURCE_DATE_EPOCH:+"-Dproject.build.outputTimestamp=$SOURCE_DATE_EPOCH"} verify
 
 FROM amazoncorretto:25
